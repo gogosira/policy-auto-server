@@ -37,8 +37,11 @@ def run():
     for ministry, url in rss_urls.items():
         feed = feedparser.parse(url)
         for entry in feed.entries[:5]:
-            if hasattr(entry, 'published_parsed'):
+            if hasattr(entry, 'published_parsed') and entry.published_parsed:
                 pub_date = datetime(*entry.published_parsed[:6], tzinfo=pytz.utc).astimezone(pytz.timezone('Asia/Seoul'))
+                
+                if pub_date.year < 2024:
+                    continue
                 if not (start_of_week.date() <= pub_date.date() <= end_of_week.date()):
                     continue
             else:
@@ -88,11 +91,14 @@ def run():
 
     print(f"[서버] GPT 요약 완료: {len(summaries)}건")
 
-    try:
-        res = requests.post(WEBHOOK_URL, json={"summaries": summaries})
-        print("[서버] 결과 전송 완료 → 응답코드:", res.status_code)
-    except Exception as e:
-        print("[서버] Webhook 전송 실패:", e)
+    if summaries:
+        try:
+            res = requests.post(WEBHOOK_URL, json={"summaries": summaries})
+            print("[서버] 결과 전송 완료 → 응답코드:", res.status_code)
+        except Exception as e:
+            print("[서버] Webhook 전송 실패:", e)
+    else:
+        print("[서버] 전송 생략: 요약 없음")
 
     return jsonify({"result": "ok", "count": len(summaries)})
 

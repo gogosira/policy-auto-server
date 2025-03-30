@@ -1,7 +1,7 @@
 
 flask
-feedparser
-beautifulsoup4
 requests
+beautifulsoup4
+feedparser
 pytz
-openai
+openai==0.28
