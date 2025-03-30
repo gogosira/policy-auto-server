@@ -1,17 +1,13 @@
-
-from flask import Flask, request, jsonify
+import os
 import feedparser
 import requests
-from bs4 import BeautifulSoup
+from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
-import logging
-import os
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
 
-MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL") or "https://hook.eu2.make.com/여기에-당신의-수신-웹훅"
-
+# 8개 부처 RSS 주소
 RSS_FEEDS = {
     "기획재정부": "https://www.korea.kr/rss/dept_moef.xml",
     "보건복지부": "https://www.korea.kr/rss/dept_mw.xml",
@@ -23,55 +19,63 @@ RSS_FEEDS = {
     "환경부": "https://www.korea.kr/rss/dept_me.xml"
 }
 
-def clean_html(raw_html):
-    soup = BeautifulSoup(raw_html, "html.parser")
-    return soup.get_text(separator=" ", strip=True)
+# 텍스트 요약용 함수
+def clean_html(html_text):
+    return BeautifulSoup(html_text, "html.parser").get_text()
+
+def summarize_articles(entries, ministry, max_articles=3):
+    summaries = []
+    for entry in entries[:max_articles]:
+        published = entry.get("published", "")
+        try:
+            pub_date = datetime.strptime(published[:16], "%a, %d %b %Y")
+        except:
+            continue
+
+        content = clean_html(entry.get("summary", ""))
+        summaries.append({
+            "title": entry.get("title", "제목 없음"),
+            "ministry": ministry,
+            "published": pub_date.strftime("%Y-%m-%d"),
+            "content": content
+        })
+    return summaries
 
 @app.route("/run", methods=["POST"])
-def run():
-    logging.info("[서버] 실행 요청 수신 → 기사 수집 시작")
+def run_script():
+    print("[서버] 실행 요청 수신 → 기사 수집 시작")
 
     today = datetime.now()
-    start_date = today - timedelta(days=7)
-
+    start_date = today - timedelta(days=7)  # 최근 7일
     summaries = []
+
     for ministry, url in RSS_FEEDS.items():
         feed = feedparser.parse(url)
+        filtered = []
         for entry in feed.entries:
             try:
-                pub_date = datetime(*entry.published_parsed[:6])
-            except AttributeError:
-                continue
-            if not (start_date <= pub_date <= today):
-                continue
-
-            title = entry.title
-            summary = entry.summary if hasattr(entry, "summary") else ""
-            link = entry.link
-            try:
-                html = requests.get(link, timeout=5).text
-                content = clean_html(html)
+                pub_date = datetime.strptime(entry.published[:16], "%a, %d %b %Y")
+                if start_date <= pub_date <= today:
+                    filtered.append(entry)
             except:
-                content = summary or "내용 없음"
+                continue
 
-            summaries.append({
-                "title": title,
-                "ministry": ministry,
-                "published": pub_date.strftime("%Y-%m-%d"),
-                "content": content
-            })
+        print(f"📌 {ministry} 기사 수집: {len(filtered)}건")
+        ministry_summaries = summarize_articles(filtered, ministry)
+        summaries.extend(ministry_summaries)
 
-            logging.info(f"[📰 기사] {pub_date.strftime('%Y-%m-%d')} | {ministry} | {title}")
+    print(f"✅ 전체 기사 수: {len(summaries)}")
 
-    if not summaries:
-        logging.info("[서버] 전송할 요약 없음")
-        return jsonify({"status": "no data"}), 200
+    # Webhook 전송
+    make_webhook = os.getenv("MAKE_WEBHOOK_URL")
+    if make_webhook:
+        res = requests.post(make_webhook, json={"summaries": summaries})
+        print(f"📤 Webhook 전송 결과: {res.status_code}")
+    else:
+        print("❌ MAKE_WEBHOOK_URL 환경변수 없음")
 
-    logging.info("[서버] Webhook 전송 시도")
-    res = requests.post(MAKE_WEBHOOK_URL, json={"summaries": summaries})
-    logging.info(f"[서버] Webhook 전송 결과: {res.status_code}")
-
-    return jsonify({"status": "success", "count": len(summaries)}), 200
+    return jsonify({"count": len(summaries)})
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=False, host="0.0.0.0", port=port)
