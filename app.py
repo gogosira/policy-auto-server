@@ -39,6 +39,7 @@ def run():
         for entry in feed.entries[:5]:
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
                 pub_date = datetime(*entry.published_parsed[:6], tzinfo=pytz.utc).astimezone(pytz.timezone('Asia/Seoul'))
+                print(f"[📰 기사] {pub_date.strftime('%Y-%m-%d')} | {ministry} | {entry.title}")
                 
                 if pub_date.year < 2024:
                     continue
@@ -92,6 +93,7 @@ def run():
     print(f"[서버] GPT 요약 완료: {len(summaries)}건")
 
     if summaries:
+        print("[서버] Webhook 전송 시도")
         try:
             res = requests.post(WEBHOOK_URL, json={"summaries": summaries})
             print("[서버] 결과 전송 완료 → 응답코드:", res.status_code)
