@@ -1,18 +1,18 @@
 
 from flask import Flask, request, jsonify
-from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
 import feedparser
 import requests
-import pytz
-import openai
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+import logging
 import os
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
-openai.api_key = os.environ.get("OPENAI_API_KEY")
+MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL") or "https://hook.eu2.make.com/여기에-당신의-수신-웹훅"
 
-rss_urls = {
+RSS_FEEDS = {
     "기획재정부": "https://www.korea.kr/rss/dept_moef.xml",
     "보건복지부": "https://www.korea.kr/rss/dept_mw.xml",
     "중소벤처기업부": "https://www.korea.kr/rss/dept_mss.xml",
@@ -23,91 +23,55 @@ rss_urls = {
     "환경부": "https://www.korea.kr/rss/dept_me.xml"
 }
 
-WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
+def clean_html(raw_html):
+    soup = BeautifulSoup(raw_html, "html.parser")
+    return soup.get_text(separator=" ", strip=True)
 
 @app.route("/run", methods=["POST"])
 def run():
-    print("[서버] 실행 요청 수신 → 기사 수집 시작")
-    today = datetime.now(pytz.timezone('Asia/Seoul'))
-    start_of_week = today - timedelta(days=today.weekday())
-    end_of_week = start_of_week + timedelta(days=4)
+    logging.info("[서버] 실행 요청 수신 → 기사 수집 시작")
 
-    articles = []
-
-    for ministry, url in rss_urls.items():
-        feed = feedparser.parse(url)
-        for entry in feed.entries[:5]:
-            if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                pub_date = datetime(*entry.published_parsed[:6], tzinfo=pytz.utc).astimezone(pytz.timezone('Asia/Seoul'))
-                print(f"[📰 기사] {pub_date.strftime('%Y-%m-%d')} | {ministry} | {entry.title}")
-                
-                if pub_date.year < 2024:
-                    continue
-                if not (start_of_week.date() <= pub_date.date() <= end_of_week.date()):
-                    continue
-            else:
-                continue
-
-            try:
-                res = requests.get(entry.link, timeout=5)
-                soup = BeautifulSoup(res.text, "html.parser")
-                content_area = soup.find("div", class_="view-article")
-                content = content_area.get_text(separator="\n", strip=True) if content_area else "(본문 없음)"
-                articles.append({
-                    "ministry": ministry,
-                    "title": entry.title,
-                    "link": entry.link,
-                    "published": pub_date.strftime("%Y-%m-%d"),
-                    "content": content
-                })
-            except Exception as e:
-                print(f"[❌ 오류] {entry.link} 수집 실패: {e}")
-
-    print(f"[서버] 수집된 기사 수: {len(articles)}")
+    today = datetime.now()
+    start_date = today - timedelta(days=7)
 
     summaries = []
-    for article in articles:
-        prompt = f"""
-        [기사 제목]
-        {article['title']}
+    for ministry, url in RSS_FEEDS.items():
+        feed = feedparser.parse(url)
+        for entry in feed.entries:
+            try:
+                pub_date = datetime(*entry.published_parsed[:6])
+            except AttributeError:
+                continue
+            if not (start_date <= pub_date <= today):
+                continue
 
-        [기사 본문]
-        {article['content'][:1000]}
+            title = entry.title
+            summary = entry.summary if hasattr(entry, "summary") else ""
+            link = entry.link
+            try:
+                html = requests.get(link, timeout=5).text
+                content = clean_html(html)
+            except:
+                content = summary or "내용 없음"
 
-        위 기사의 핵심 내용을 1~2문장으로 요약해줘. 문체는 간결하고 직관적으로, 타겟은 40~60대야.
-        """
-        try:
-            response = openai.ChatCompletion.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            summary = response.choices[0].message.content.strip()
             summaries.append({
-                "제목": article['title'],
-                "요약": summary,
-                "날짜": article['published']
+                "title": title,
+                "ministry": ministry,
+                "published": pub_date.strftime("%Y-%m-%d"),
+                "content": content
             })
-        except Exception as e:
-            print(f"[GPT 요약 실패] {article['title']} → {e}")
 
-    print(f"[서버] GPT 요약 완료: {len(summaries)}건")
+            logging.info(f"[📰 기사] {pub_date.strftime('%Y-%m-%d')} | {ministry} | {title}")
 
-    if summaries:
-        print("[서버] Webhook 전송 시도")
-        try:
-            res = requests.post(WEBHOOK_URL, json={"summaries": summaries})
-            print("[서버] 결과 전송 완료 → 응답코드:", res.status_code)
-        except Exception as e:
-            print("[서버] Webhook 전송 실패:", e)
-    else:
-        print("[서버] 전송 생략: 요약 없음")
+    if not summaries:
+        logging.info("[서버] 전송할 요약 없음")
+        return jsonify({"status": "no data"}), 200
 
-    return jsonify({"result": "ok", "count": len(summaries)})
+    logging.info("[서버] Webhook 전송 시도")
+    res = requests.post(MAKE_WEBHOOK_URL, json={"summaries": summaries})
+    logging.info(f"[서버] Webhook 전송 결과: {res.status_code}")
 
-@app.route("/")
-def index():
-    return "Server is running!"
+    return jsonify({"status": "success", "count": len(summaries)}), 200
 
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    app.run(debug=True)
